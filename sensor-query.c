@@ -157,6 +157,7 @@ static void format_thresholds(struct sensor_data *sensor, char *str)
 		if (n)
 			*(p++) = ',';
 		strcpy(p, labels[i].label);
+		p += 2;
 		n++;
 	}
 
