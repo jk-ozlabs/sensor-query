@@ -235,18 +235,55 @@ static void print_sensor(sd_bus *bus, const struct sensor_desc *desc)
 	printf("%s: %s %s\n", desc->object, value_str, threshold_str);
 }
 
-int main(void)
+static bool sensor_matches_type(const struct sensor_desc *desc,
+		const char *type)
 {
+	const char *sensor_root = "/xyz/openbmc_project/sensors/";
+	size_t type_len, root_len = strlen(sensor_root);
+	const char *sep, *path = desc->object;
+
+	/* if no type was specified, everything matches */
+	if (!type || !strlen(type))
+		return true;
+
+	type_len = strlen(type);
+
+	/* are we in the sensor namespace? */
+	if (strncmp(path, sensor_root, root_len))
+		return false;
+
+	/* do we have another path component, of the right length? */
+	sep = strchr(path + root_len, '/');
+	if (!sep || (unsigned long)(sep - (path + root_len)) != type_len)
+		return false;
+
+	/* does that path component match the specified type? */
+	return !strncmp(path + root_len, type, type_len);
+}
+
+int main(int argc, char **argv)
+{
+	const char *type;
 	unsigned int i;
 	sd_bus *bus;
 	int rc;
+
+	type = NULL;
+	if (argc > 1)
+		type = argv[1];
 
 	rc = sd_bus_default(&bus);
 	if (rc < 0)
 		errx(EXIT_FAILURE, "can't connect to dbus: %s", strerror(-rc));
 
-	for (i = 0; i < ARRAY_SIZE(descs); i++)
-		print_sensor(bus, &descs[i]);
+	for (i = 0; i < ARRAY_SIZE(descs); i++) {
+		const struct sensor_desc *desc = &descs[i];
+
+		if (!sensor_matches_type(desc, type))
+			continue;
+
+		print_sensor(bus, desc);
+	}
 
 	return EXIT_SUCCESS;
 }
