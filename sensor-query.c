@@ -3,8 +3,10 @@
  */
 
 #include <err.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include <systemd/sd-bus.h>
@@ -27,12 +29,51 @@ static const struct sensor_desc descs[] = {
 };
 
 struct sensor_data {
-	double	value;
+	char	type;
+	union {
+		double d;
+		int64_t x;
+	} value;
 	bool	lower_crit;
 	bool	upper_crit;
 	bool	lower_warn;
 	bool	upper_warn;
 };
+
+/* parses a reply message (currently referencing a variant) into a
+ * sensor value. Will consume the variant from the reply. */
+static int parse_sensor_value(sd_bus_message *reply, struct sensor_data *data,
+		const char *obj)
+{
+	const char *type_str = NULL;
+	char c;
+	int rc;
+
+	rc = sd_bus_message_peek_type(reply, &c, &type_str);
+	if (rc < 0)
+		return rc;
+
+	if (c != 'v' || strlen(type_str) != 1) {
+		printf("%s: invalid sensor type %c:%s\n", obj, c, type_str);
+		return -1;
+	}
+
+	data->type = type_str[0];
+
+	if (data->type == 'd') {
+		rc = sd_bus_message_read(reply, "v", "d", &data->value.d);
+
+	} else if (data->type == 'x') {
+		rc = sd_bus_message_read(reply, "v", "x", &data->value.x);
+
+	} else {
+		printf("%s: invalid type '%c', expected 'd/x'\n",
+				obj, data->type);
+		rc = -1;
+	}
+
+	return rc;
+}
 
 /* Query a sensor object over dbus, by performing a single GetAll method
  * on the properties interface. That provides the threhold states and
@@ -60,10 +101,11 @@ static int query_sensor(sd_bus *bus, const struct sensor_desc *desc,
 	if (rc < 0)
 		return rc;
 
+	value_set = false;
 	for (;;) {
 		bool *threshold_p;
-		double *value_p;
 		const char *prop;
+		bool is_value;
 
 		rc = sd_bus_message_enter_container(reply, 'e', "sv");
 		if (rc <= 0)
@@ -74,10 +116,10 @@ static int query_sensor(sd_bus *bus, const struct sensor_desc *desc,
 			break;
 
 		threshold_p = NULL;
-		value_p = NULL;
+		is_value = false;
 
 		if (!strcmp(prop, "Value")) {
-			value_p = &sensor->value;
+			is_value = true;
 		} else if (!strcmp(prop, "CriticalAlarmLow")) {
 			threshold_p = &sensor->lower_crit;
 		} else if (!strcmp(prop, "CriticalAlarmHigh")) {
@@ -88,18 +130,11 @@ static int query_sensor(sd_bus *bus, const struct sensor_desc *desc,
 			threshold_p = &sensor->upper_warn;
 		}
 
-		if (value_p) {
-			const char *type = NULL;
-			rc = sd_bus_message_peek_type(reply, NULL, &type);
-			if (rc < 0 || strcmp(type, "d")) {
-				printf("%s: invalid type '%s', expected 'd'\n",
-						desc->object, type);
-				rc = -1;
-				break;
-			}
-			rc = sd_bus_message_read(reply, "v", "d", value_p);
+		if (is_value) {
+			rc = parse_sensor_value(reply, sensor, desc->object);
 			if (rc < 0)
 				break;
+
 			value_set = true;
 
 		} else if (threshold_p) {
@@ -165,10 +200,27 @@ static void format_thresholds(struct sensor_data *sensor, char *str)
 		strcpy(p, "ok");
 }
 
+/* str assumed to be 12 bytes */
+static void format_value(const struct sensor_data *sensor, char *str)
+{
+	const size_t str_size = 12;
+
+	switch (sensor->type) {
+	case 'd':
+		snprintf(str, str_size, "%f", sensor->value.d);
+		break;
+	case 'x':
+		snprintf(str, str_size, "%" PRId64, sensor->value.x);
+		break;
+	default:
+		strncpy(str, "(unknown)", str_size);
+	}
+}
+
 static void print_sensor(sd_bus *bus, const struct sensor_desc *desc)
 {
+	char threshold_str[12], value_str[12];
 	struct sensor_data sensor;
-	char threshold_str[12];
 	int rc;
 
 	rc = query_sensor(bus, desc, &sensor);
@@ -177,9 +229,10 @@ static void print_sensor(sd_bus *bus, const struct sensor_desc *desc)
 		return;
 	}
 
+	format_value(&sensor, value_str);
 	format_thresholds(&sensor, threshold_str);
 
-	printf("%s: %f %s\n", desc->object, sensor.value, threshold_str);
+	printf("%s: %s %s\n", desc->object, value_str, threshold_str);
 }
 
 int main(void)
